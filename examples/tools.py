@@ -1,10 +1,10 @@
 from datetime import datetime
-from livekit.agents import llm
+from livekit.agents.llm import function_tool
 
 class AssistantFnc:
     """Helper functions for the assistant."""
 
-    @llm.function_tool(description="Hàm này trả về ngày giờ hiện tại.")
+    @function_tool(description="Hàm này trả về ngày giờ hiện tại.")
     def get_datetime(self) -> str:
         """Trả về ngày giờ hiện tại ở định dạng dễ đọc."""
         now = datetime.now()
