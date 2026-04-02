@@ -36,7 +36,10 @@ dependencies = [
     "piper-tts>=1.2.0",
     "numpy>=1.24.0",
     "python-dotenv>=1.0.0",
-    "torch>=2.0.0",  # Provides CUDA 12 libraries for faster-whisper
+    "torch==2.10.0+cu128",  # Provides CUDA 12 libraries for faster-whisper
+    "pydantic-settings>=2.13.1",
+    "torchaudio==2.10.0+cu128",
+    "torchvision==0.25.0+cu128",
 ]
 
 [project.optional-dependencies]
