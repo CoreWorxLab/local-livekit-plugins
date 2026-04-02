@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from livekit.agents.tts.tts import AudioEmitter
 
 # Add VieNeu-TTS source directory to path if it exists locally
-_project_root = Path(__file__).parent.parent.parent
+_project_root = Path(__file__).parent.parent
 _vieneu_src = _project_root / "models" / "VieNeu-TTS" / "src"
 if _vieneu_src.exists() and str(_vieneu_src) not in sys.path:
     # Insert at the beginning to prefer the version in the models folder
@@ -50,7 +50,7 @@ class VieNeuTTS(tts.TTS):
         self,
         api_base: str = "http://localhost:23333/v1",
         model_name: str = "pnnbao-ump/VieNeu-TTS",
-        voice_id: Optional[str] = None,
+        voice_id: Optional[str] = "Doan", # Default to Doan if not specified
     ) -> None:
         if RemoteVieNeuTTS is None:
             raise ImportError(
@@ -97,6 +97,18 @@ class VieNeuTTS(tts.TTS):
         if conn_options is None:
             conn_options = APIConnectOptions()
 
+        # Filter out empty or JSON-like content that shouldn't be synthesized
+        stripped_text = text.strip()
+        if not stripped_text or stripped_text in ("{}", "[]"):
+            logger.debug(f"Skipping synthesis for non-textual content: '{text}'")
+            # Return an empty stream that flushes immediately
+            from .vieneu_tts import _VieNeuEmptyStream
+            return _VieNeuEmptyStream(
+                tts_plugin=self,
+                input_text=text,
+                conn_options=conn_options,
+            )
+
         logger.debug(f"Synthesizing ({len(text)} chars) via VieNeu: {text[:50]}...")
 
         return _VieNeuChunkedStream(
@@ -104,6 +116,32 @@ class VieNeuTTS(tts.TTS):
             input_text=text,
             conn_options=conn_options,
         )
+
+class _VieNeuEmptyStream(tts.ChunkedStream):
+    """
+    An empty stream that satisfies the API but generates no audio.
+    """
+    def __init__(
+        self,
+        *,
+        tts_plugin: VieNeuTTS,
+        input_text: str,
+        conn_options: APIConnectOptions,
+    ) -> None:
+        super().__init__(tts=tts_plugin, input_text=input_text, conn_options=conn_options)
+
+    async def _run(self, emitter: AudioEmitter) -> None:
+        emitter.initialize(
+            request_id=str(uuid.uuid4()),
+            sample_rate=self._tts.sample_rate,
+            num_channels=self._tts.num_channels,
+            mime_type="audio/pcm",
+        )
+        # Push at least one silent frame to avoid livekit-agents "no audio frames" error
+        # A 100ms silent buffer (longer than previous 10ms to be safer)
+        silence = b"\x00" * int(self._tts.sample_rate * 0.1 * 2)
+        emitter.push(silence)
+        emitter.flush()
 
 class _VieNeuChunkedStream(tts.ChunkedStream):
     """
@@ -133,25 +171,32 @@ class _VieNeuChunkedStream(tts.ChunkedStream):
 
         loop = asyncio.get_running_loop()
         
+        pushed_any = False
         try:
             # We run the blocking stream generator in a thread pool
             def process_synthesis():
-                # Get the stream generator from the client
-                gen = self._plugin._client.infer_stream(
-                    self._input_text,
-                    voice=self._plugin._voice_data
-                )
-                
-                for audio_chunk in gen:
-                    if audio_chunk is None or len(audio_chunk) == 0:
-                        continue
-                        
-                    # VieNeu returns float32 numpy arrays [-1.0, 1.0]
-                    # We convert to int16 PCM for LiveKit
-                    pcm_chunk = (audio_chunk * 32767).astype(np.int16).tobytes()
+                nonlocal pushed_any
+                try:
+                    # Get the stream generator from the client
+                    gen = self._plugin._client.infer_stream(
+                        self._input_text,
+                        voice=self._plugin._voice_data
+                    )
                     
-                    # Push directly to the emitter
-                    emitter.push(pcm_chunk)
+                    for audio_chunk in gen:
+                        if audio_chunk is None or len(audio_chunk) == 0:
+                            continue
+                            
+                        # VieNeu returns float32 numpy arrays [-1.0, 1.0]
+                        # We convert to int16 PCM for LiveKit
+                        pcm_chunk = (audio_chunk * 32767).astype(np.int16).tobytes()
+                        
+                        # Push directly to the emitter
+                        emitter.push(pcm_chunk)
+                        pushed_any = True
+                except Exception as e:
+                    logger.error(f"Error in VieNeu synthesis thread: {e}")
+                    raise
                     
             # Run the synthesis and emission in a background thread
             await loop.run_in_executor(None, process_synthesis)
@@ -160,4 +205,9 @@ class _VieNeuChunkedStream(tts.ChunkedStream):
             logger.exception(f"Unexpected error during VieNeu synthesis: {e}")
         finally:
             # Signal the end of the stream
+            if not pushed_any:
+                logger.warning(f"No audio frames were pushed for text: '{self._input_text}'. Pushing silence fallback.")
+                # Push a short silent frame (100ms)
+                silence = b"\x00" * int(self._tts.sample_rate * 0.1 * 2)
+                emitter.push(silence)
             emitter.flush()
