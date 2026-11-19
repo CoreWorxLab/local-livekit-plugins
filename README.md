@@ -68,7 +68,7 @@ cd local-livekit-plugins
 uv sync
 
 # Or with pip
-pip install -e ".[examples]"
+pip install -e .
 ```
 
 ### 2. Download a Piper Voice Model
